@@ -11,8 +11,9 @@
     #bar { display:flex; gap:12px; padding:12px; background:rgba(0,0,0,.6); }
     button { flex:1; height:48px; font-size:16px; border:none; border-radius:10px; background:#222; color:#fff; }
     #hint { position:fixed; top:10px; left:0; right:0; text-align:center; color:#bbb; font-size:14px; }
+    #startWrap { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.85); }
+    #startBtn { padding:14px 18px; border-radius:12px; }
   </style>
-  <!-- QR-Scanner Bibliothek (CDN) -->
   <script src="https://unpkg.com/html5-qrcode" defer></script>
 </head>
 <body>
@@ -24,24 +25,31 @@
     </div>
   </div>
 
+  <!-- Wird nur gezeigt, wenn Auto-Start ohne Berechtigung scheitert -->
+  <div id="startWrap" hidden>
+    <button id="startBtn">Kamera starten</button>
+  </div>
+
   <script>
-    let qr, currentCamId = null, cams = [];
+    let qr;
     const $rescan = document.getElementById('rescan');
+    const $startWrap = document.getElementById('startWrap');
+    const $startBtn  = document.getElementById('startBtn');
 
     function extractTrackId(text) {
-      // akzeptiert spotify:track:ID oder https://open.spotify.com/track/ID
       text = text.trim();
       if (text.startsWith("spotify:track:")) return text.split("spotify:track:")[1];
       const m = text.match(/open\.spotify\.com\/track\/([A-Za-z0-9]+)\b/);
       return m ? m[1] : null;
     }
 
-    async function startScanner(deviceId = null) {
+    async function startScanner() {
       if (!qr) qr = new Html5Qrcode("scanner", false);
       const cfg = { fps: 15, qrbox: { width: 300, height: 300 } };
-      const camCfg = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" };
-      await qr.start(camCfg, cfg, onScan, () => {});
+      // Wichtig: keine Kameraliste – direkt um Rückkamera bitten
+      await qr.start({ facingMode: "environment" }, cfg, onScan, () => {});
       $rescan.disabled = true;
+      $startWrap.hidden = true;
     }
 
     async function stopScanner() {
@@ -54,31 +62,32 @@
 
       const id = extractTrackId(text);
       if (id) {
-        // Android: Intent-URL → öffnet direkt die Spotify-App
+        // App öffnen (Intent), dann spotify:, dann https – beste Chance, direkt die Spotify-App zu starten
         const intentUrl = `intent://open.spotify.com/track/${id}#Intent;scheme=https;package=com.spotify.music;end`;
-        // Fallback-Kaskade: intent -> spotify: -> https
         try { location.replace(intentUrl); } catch(e) {}
         setTimeout(() => { try { location.replace(`spotify:track:${id}`); } catch(e) {} }, 600);
         setTimeout(() => { try { location.replace(`https://open.spotify.com/track/${id}`); } catch(e) {} }, 1200);
       } else {
-        // Unbekanntes Format → einfach öffnen (Spotify regelt ggf. selbst)
         try { location.replace(text); } catch(e) {}
       }
     }
 
-    // Button: Erneut scannen
-    document.getElementById('rescan').addEventListener('click', async () => {
-      await startScanner(currentCamId);
+    // Buttons
+    $rescan.addEventListener('click', async () => { await startScanner(); });
+    $startBtn.addEventListener('click', async () => {
+      try { await startScanner(); }
+      catch(e) { alert("Kamera-Zugriff verweigert. Bitte Kamera erlauben (🔒→ Website-Einstellungen → Kamera → Zulassen) und die Seite neu laden."); }
     });
 
-    // Init
+    // Auto-Start (zeigt bei Fehler den Start-Button mit Anleitung)
     (async () => {
       try {
-        cams = (await Html5Qrcode.getCameras());
-        currentCamId = (cams.find(c => /back|rear/i.test(c.label))?.id) || cams[0]?.id || null;
-        await startScanner(currentCamId);
-      } catch(e) {
-        alert("Kamera-Zugriff fehlgeschlagen. Öffne die Seite über HTTPS (oder http://localhost) und erlaube die Kamera.");
+        // Einige Browser fragen erst nach Interaktion – wir probieren es trotzdem:
+        await startScanner();
+      } catch (e) {
+        $startWrap.hidden = false;
+        // Kleiner Hinweis bei harter Sperre:
+        // console.warn(e);
       }
     })();
   </script>
