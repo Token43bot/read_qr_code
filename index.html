@@ -7,34 +7,39 @@
   <style>
     html, body { margin:0; padding:0; height:100%; background:#000; }
     #app { display:flex; flex-direction:column; height:100%; }
-    #scanner { flex:1; }
+    #scanner { flex:1; position:relative; }
     #bar { display:flex; gap:12px; padding:12px; background:rgba(0,0,0,.6); }
     button { flex:1; height:48px; font-size:16px; border:none; border-radius:10px; background:#222; color:#fff; }
     #hint { position:fixed; top:10px; left:0; right:0; text-align:center; color:#bbb; font-size:14px; }
-    #startWrap { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.85); }
+    #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.75); }
     #startBtn { padding:14px 18px; border-radius:12px; }
+    #msg { position:fixed; bottom:68px; left:0; right:0; text-align:center; color:#f88; font-size:13px; padding:6px 10px; }
   </style>
   <script src="https://unpkg.com/html5-qrcode" defer></script>
 </head>
 <body>
   <div id="app">
     <div id="hint">Kamera auf QR halten – nach Treffer wird Spotify geöffnet.</div>
-    <div id="scanner"></div>
+    <div id="scanner">
+      <div id="overlay"><button id="startBtn">Kamera starten</button></div>
+    </div>
     <div id="bar">
       <button id="rescan" disabled>Erneut scannen</button>
+      <button id="switch" disabled>Kamera wechseln</button>
     </div>
-  </div>
-
-  <!-- Wird nur gezeigt, wenn Auto-Start ohne Berechtigung scheitert -->
-  <div id="startWrap" hidden>
-    <button id="startBtn">Kamera starten</button>
+    <div id="msg"></div>
   </div>
 
   <script>
-    let qr;
+    let qr, cams = [], currentIdx = 0;
+    const $overlay = document.getElementById('overlay');
+    const $startBtn = document.getElementById('startBtn');
     const $rescan = document.getElementById('rescan');
-    const $startWrap = document.getElementById('startWrap');
-    const $startBtn  = document.getElementById('startBtn');
+    const $switch = document.getElementById('switch');
+    const $msg = document.getElementById('msg');
+
+    function showMsg(t, ok=false){ $msg.style.color = ok ? '#9f9' : '#f88'; $msg.textContent = t; }
+    function clearMsg(){ $msg.textContent = ''; }
 
     function extractTrackId(text) {
       text = text.trim();
@@ -43,53 +48,94 @@
       return m ? m[1] : null;
     }
 
-    async function startScanner() {
+    async function askCameraPermission() {
+      // sehr breite Anforderung → Dialog erscheint sicher
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      s.getTracks().forEach(t => t.stop());
+    }
+
+    async function listCameras() {
+      try {
+        cams = await Html5Qrcode.getCameras();
+      } catch (e) {
+        // Manche Browser liefern erst nach getUserMedia() Kameras – dann nochmal versuchen
+        cams = await Html5Qrcode.getCameras();
+      }
+      if (!cams || !cams.length) throw new Error('Keine Kamera gefunden (evtl. andere App nutzt die Kamera).');
+      // Back bevorzugen
+      const backIdx = cams.findIndex(c => /back|rear|environment/i.test(c.label));
+      currentIdx = backIdx >= 0 ? backIdx : 0;
+    }
+
+    async function startWithCurrentCam() {
       if (!qr) qr = new Html5Qrcode("scanner", false);
+      const deviceId = cams[currentIdx].id;
       const cfg = { fps: 15, qrbox: { width: 300, height: 300 } };
-      // Wichtig: keine Kameraliste – direkt um Rückkamera bitten
-      await qr.start({ facingMode: "environment" }, cfg, onScan, () => {});
+      await qr.start({ deviceId: { exact: deviceId } }, cfg, onScan, onScanError);
+      $overlay.style.display = 'none';
       $rescan.disabled = true;
-      $startWrap.hidden = true;
+      $switch.disabled = cams.length <= 1;
+      clearMsg();
     }
 
     async function stopScanner() {
-      try { await qr?.stop(); } catch(e) {}
+      try { await qr?.stop(); } catch(_) {}
     }
 
     async function onScan(text) {
       await stopScanner();
       $rescan.disabled = false;
-
       const id = extractTrackId(text);
       if (id) {
-        // App öffnen (Intent), dann spotify:, dann https – beste Chance, direkt die Spotify-App zu starten
         const intentUrl = `intent://open.spotify.com/track/${id}#Intent;scheme=https;package=com.spotify.music;end`;
         try { location.replace(intentUrl); } catch(e) {}
-        setTimeout(() => { try { location.replace(`spotify:track:${id}`); } catch(e) {} }, 600);
-        setTimeout(() => { try { location.replace(`https://open.spotify.com/track/${id}`); } catch(e) {} }, 1200);
+        setTimeout(() => { try { location.replace(`spotify:track:${id}`); } catch(e) {} }, 500);
+        setTimeout(() => { try { location.replace(`https://open.spotify.com/track/${id}`); } catch(e) {} }, 1000);
       } else {
         try { location.replace(text); } catch(e) {}
       }
     }
 
-    // Buttons
-    $rescan.addEventListener('click', async () => { await startScanner(); });
-    $startBtn.addEventListener('click', async () => {
-      try { await startScanner(); }
-      catch(e) { alert("Kamera-Zugriff verweigert. Bitte Kamera erlauben (🔒→ Website-Einstellungen → Kamera → Zulassen) und die Seite neu laden."); }
+    function onScanError(_) { /* leise bleiben */ }
+
+    async function startFlow() {
+      try {
+        showMsg('Kamera-Berechtigung anfordern…', true);
+        await askCameraPermission();
+        showMsg('Kameras auflisten…', true);
+        await listCameras();
+        showMsg('Starte Kamera…', true);
+        await startWithCurrentCam();
+      } catch (e) {
+        // genaue Fehlerursache anzeigen
+        const name = e?.name || '';
+        const msg = e?.message || String(e);
+        if (name === 'NotAllowedError' || name === 'SecurityError') {
+          showMsg('Kamera-Zugriff verweigert. Tippe auf das Schloss ▸ Website-Einstellungen ▸ Kamera ▸ Zulassen ▸ neu laden.');
+        } else if (name === 'NotFoundError' || /Keine Kamera gefunden/.test(msg)) {
+          showMsg('Keine Kamera gefunden. Ist eine andere App (Video/Scanner) aktiv? Schließen und erneut versuchen.');
+        } else if (name === 'NotReadableError') {
+          showMsg('Kamera belegt. Andere Kamera-App schließen und erneut versuchen.');
+        } else if (name === 'OverconstrainedError') {
+          showMsg('Angeforderte Kamera nicht verfügbar. Wechsle mit „Kamera wechseln“.');
+        } else {
+          showMsg('Fehler: ' + (name ? name + ' – ' : '') + msg);
+        }
+        $overlay.style.display = ''; // Button sichtbar lassen
+      }
+    }
+
+    // UI Events
+    $startBtn.addEventListener('click', startFlow);
+    $rescan.addEventListener('click', async () => { clearMsg(); await startWithCurrentCam(); });
+    $switch.addEventListener('click', async () => {
+      currentIdx = (currentIdx + 1) % cams.length;
+      await stopScanner();
+      await startWithCurrentCam();
     });
 
-    // Auto-Start (zeigt bei Fehler den Start-Button mit Anleitung)
-    (async () => {
-      try {
-        // Einige Browser fragen erst nach Interaktion – wir probieren es trotzdem:
-        await startScanner();
-      } catch (e) {
-        $startWrap.hidden = false;
-        // Kleiner Hinweis bei harter Sperre:
-        // console.warn(e);
-      }
-    })();
+    // Auto-Start versuchen (zeigt bei Fail den Button + Meldung)
+    window.addEventListener('load', () => { startFlow(); });
   </script>
 </body>
 </html>
