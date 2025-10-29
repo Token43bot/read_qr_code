@@ -13,13 +13,13 @@
     #hint { position:fixed; top:10px; left:0; right:0; text-align:center; color:#bbb; font-size:14px; }
     #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.75); }
     #startBtn { padding:14px 18px; border-radius:12px; }
-    #msg { position:fixed; bottom:68px; left:0; right:0; text-align:center; color:#f88; font-size:13px; padding:6px 10px; }
+    #msg { position:fixed; bottom:68px; left:0; right:0; text-align:center; color:#9f9; font-size:13px; padding:6px 10px; }
   </style>
   <script src="https://unpkg.com/html5-qrcode" defer></script>
 </head>
 <body>
   <div id="app">
-    <div id="hint">Kamera auf QR halten – nach Treffer wird Spotify geöffnet.</div>
+    <div id="hint">Kamera auf QR halten – nach Treffer öffnet sich Spotify. Diese Seite bleibt offen.</div>
     <div id="scanner">
       <div id="overlay"><button id="startBtn">Kamera starten</button></div>
     </div>
@@ -32,14 +32,16 @@
 
   <script>
     let qr, cams = [], currentIdx = 0;
+    let cooldown = false;                     // Entprellung für Mehrfach-Treffer
+    const COOLDOWN_MS = 2500;
+
     const $overlay = document.getElementById('overlay');
     const $startBtn = document.getElementById('startBtn');
     const $rescan = document.getElementById('rescan');
     const $switch = document.getElementById('switch');
     const $msg = document.getElementById('msg');
 
-    function showMsg(t, ok=false){ $msg.style.color = ok ? '#9f9' : '#f88'; $msg.textContent = t; }
-    function clearMsg(){ $msg.textContent = ''; }
+    function toast(t){ $msg.textContent = t; setTimeout(()=> $msg.textContent='', 2000); }
 
     function extractTrackId(text) {
       text = text.trim();
@@ -48,21 +50,38 @@
       return m ? m[1] : null;
     }
 
+    // Öffnet eine URL/Intent OHNE die aktuelle Seite zu entladen
+    function openExternal(href) {
+      const a = document.createElement('a');
+      a.href = href;
+      a.target = '_blank';        // neuer Kontext/App-Switch
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    function launchSpotifyFromId(id) {
+      // 1) Intent (Android App), 2) Spotify-Schema, 3) HTTPS – alle im neuen Kontext
+      openExternal(`intent://open.spotify.com/track/${id}#Intent;scheme=https;package=com.spotify.music;end`);
+      setTimeout(() => openExternal(`spotify:track:${id}`), 300);
+      setTimeout(() => openExternal(`https://open.spotify.com/track/${id}`), 600);
+    }
+
+    function launchSpotify(text) {
+      const id = extractTrackId(text);
+      if (id) launchSpotifyFromId(id); else openExternal(text);
+    }
+
     async function askCameraPermission() {
-      // sehr breite Anforderung → Dialog erscheint sicher
       const s = await navigator.mediaDevices.getUserMedia({ video: true });
       s.getTracks().forEach(t => t.stop());
     }
 
     async function listCameras() {
-      try {
-        cams = await Html5Qrcode.getCameras();
-      } catch (e) {
-        // Manche Browser liefern erst nach getUserMedia() Kameras – dann nochmal versuchen
-        cams = await Html5Qrcode.getCameras();
-      }
-      if (!cams || !cams.length) throw new Error('Keine Kamera gefunden (evtl. andere App nutzt die Kamera).');
-      // Back bevorzugen
+      try { cams = await Html5Qrcode.getCameras(); }
+      catch (_) { cams = await Html5Qrcode.getCameras(); }
+      if (!cams.length) throw new Error('Keine Kamera gefunden.');
       const backIdx = cams.findIndex(c => /back|rear|environment/i.test(c.label));
       currentIdx = backIdx >= 0 ? backIdx : 0;
     }
@@ -71,70 +90,52 @@
       if (!qr) qr = new Html5Qrcode("scanner", false);
       const deviceId = cams[currentIdx].id;
       const cfg = { fps: 15, qrbox: { width: 300, height: 300 } };
-      await qr.start({ deviceId: { exact: deviceId } }, cfg, onScan, onScanError);
+      await qr.start({ deviceId: { exact: deviceId } }, cfg, onScan, () => {});
       $overlay.style.display = 'none';
-      $rescan.disabled = true;
+      $rescan.disabled = false;
       $switch.disabled = cams.length <= 1;
-      clearMsg();
+      toast('Scanner bereit');
     }
 
-    async function stopScanner() {
-      try { await qr?.stop(); } catch(_) {}
-    }
+    async function stopScanner(){ try { await qr?.stop(); } catch(_) {} }
 
     async function onScan(text) {
-      await stopScanner();
-      $rescan.disabled = false;
-      const id = extractTrackId(text);
-      if (id) {
-        const intentUrl = `intent://open.spotify.com/track/${id}#Intent;scheme=https;package=com.spotify.music;end`;
-        try { location.replace(intentUrl); } catch(e) {}
-        setTimeout(() => { try { location.replace(`spotify:track:${id}`); } catch(e) {} }, 500);
-        setTimeout(() => { try { location.replace(`https://open.spotify.com/track/${id}`); } catch(e) {} }, 1000);
-      } else {
-        try { location.replace(text); } catch(e) {}
-      }
-    }
+      if (cooldown) return;            // denselben Code nicht mehrfach zünden
+      cooldown = true;
+      setTimeout(() => cooldown = false, COOLDOWN_MS);
 
-    function onScanError(_) { /* leise bleiben */ }
+      launchSpotify(text);             // öffnet App/Link in neuem Kontext
+      // Scanner bleibt aktiv – Seite wird nicht navigiert.
+      toast('Öffne Spotify …');
+    }
 
     async function startFlow() {
       try {
-        showMsg('Kamera-Berechtigung anfordern…', true);
         await askCameraPermission();
-        showMsg('Kameras auflisten…', true);
         await listCameras();
-        showMsg('Starte Kamera…', true);
         await startWithCurrentCam();
       } catch (e) {
-        // genaue Fehlerursache anzeigen
-        const name = e?.name || '';
-        const msg = e?.message || String(e);
-        if (name === 'NotAllowedError' || name === 'SecurityError') {
-          showMsg('Kamera-Zugriff verweigert. Tippe auf das Schloss ▸ Website-Einstellungen ▸ Kamera ▸ Zulassen ▸ neu laden.');
-        } else if (name === 'NotFoundError' || /Keine Kamera gefunden/.test(msg)) {
-          showMsg('Keine Kamera gefunden. Ist eine andere App (Video/Scanner) aktiv? Schließen und erneut versuchen.');
-        } else if (name === 'NotReadableError') {
-          showMsg('Kamera belegt. Andere Kamera-App schließen und erneut versuchen.');
-        } else if (name === 'OverconstrainedError') {
-          showMsg('Angeforderte Kamera nicht verfügbar. Wechsle mit „Kamera wechseln“.');
-        } else {
-          showMsg('Fehler: ' + (name ? name + ' – ' : '') + msg);
-        }
-        $overlay.style.display = ''; // Button sichtbar lassen
+        $overlay.style.display = '';
+        alert('Kamera-Zugriff verweigert oder nicht verfügbar. Bitte im Schloss-Symbol → Website-Einstellungen → Kamera → Zulassen.');
       }
     }
 
     // UI Events
     $startBtn.addEventListener('click', startFlow);
-    $rescan.addEventListener('click', async () => { clearMsg(); await startWithCurrentCam(); });
+    $rescan.addEventListener('click', async () => { /* nichts nötig – Scanner läuft */ toast('Bereit zum Scannen'); });
     $switch.addEventListener('click', async () => {
       currentIdx = (currentIdx + 1) % cams.length;
       await stopScanner();
       await startWithCurrentCam();
     });
 
-    // Auto-Start versuchen (zeigt bei Fail den Button + Meldung)
+    // Bei Rückkehr aus Spotify: einfach weiter scannen
+    document.addEventListener('visibilitychange', () => {
+      // Nichts tun – Scanner läuft weiter; wir resetten nur die Entprellung.
+      if (!document.hidden) cooldown = false;
+    });
+
+    // Auto-Start
     window.addEventListener('load', () => { startFlow(); });
   </script>
 </body>
